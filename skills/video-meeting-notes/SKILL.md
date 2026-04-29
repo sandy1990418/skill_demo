@@ -1,106 +1,114 @@
 ---
 name: video-meeting-notes
-description: Convert a meeting/lecture/talk video into illustrated markdown notes by transcribing speech with OpenAI Whisper, extracting scene-change keyframes, and aligning images to topic sections. Use when the user provides a video file or YouTube URL and wants a structured, image-rich summary.
+description: Convert a meeting/lecture/talk video into illustrated markdown notes by transcribing speech and extracting scene keyframes, then composing an image-rich summary. Use when the user provides a video file or YouTube URL and wants structured, illustrated notes.
 ---
 
 # Video Meeting Notes
 
-Three-stage pipeline. Run scripts in order. Each accepts `--help`; check it if unsure of args.
-
-## When to use
-
-- User has a `.mp4` / `.mov` / `.mkv` / `.webm` file, OR a YouTube URL
-- User wants a markdown document with section headings, bullet summaries, AND embedded screenshots from the video
-- Talks, lectures, demos, meeting recordings, conference sessions
-
-## Resolving the input path
-
-The user will give you EITHER a local file path OR a YouTube URL. Treat it as a literal string — do NOT invent paths.
-
-1. **Local path**: convert to absolute (`realpath` or `python -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' <path>`). Verify it exists with `ls -la <abs-path>` before running the pipeline. If it doesn't exist, ask the user to confirm.
-2. **YouTube URL** (contains `youtube.com` or `youtu.be`): download first with
-   ```
-   yt-dlp -f "bv*[height<=480]+ba/b[height<=480]" --merge-output-format mp4 \
-     -o '/tmp/vmn_input.%(ext)s' '<URL>'
-   ```
-   Then use the resulting `/tmp/vmn_input.mp4` as the video path.
-3. Pick a working directory for outputs. Default: `/tmp/vmn_<short-slug>/`. Pass absolute paths to every script.
+Orchestrates three tasks to produce illustrated notes from a video.
+Tasks A and B are independent and MUST be spawned in parallel.
+Task C depends on both and runs after they complete.
 
 ## Required environment
 
-- `OPENAI_API_KEY` set in the environment
+- `OPENAI_API_KEY` in the environment (used by transcription and compose tasks)
 - `ffmpeg` on PATH
-- Run scripts from the project root with `.venv/bin/python` (or whatever uv-managed python the user has)
+- Python: `.venv/bin/python`
 
-## Pipeline
+## Step 0 — Resolve input
 
-For a YouTube URL, first download with `yt-dlp -f "bv*[height<=480]+ba/b[height<=480]" -o '/tmp/vmn_input.%(ext)s' <URL>` and use the resulting file path.
+Determine the video path:
 
-```
-1) scripts/transcribe.py        video.mp4   -> transcript.json
-2) scripts/extract_frames.py    video.mp4   -> frames/*.jpg + frames/frame_times.json
-3) scripts/compose_notes.py     ^ both       -> notes.md
-```
+- **Local file**: convert to absolute path. Verify with `ls -la <path>` — stop and ask user if missing.
+- **YouTube URL** (`youtube.com` or `youtu.be`): download first:
+  ```
+  yt-dlp -f "bv*[height<=480]+ba/b[height<=480]" --merge-output-format mp4 \
+    -o '/tmp/vmn_input.%(ext)s' '<URL>'
+  ```
+  Use the resulting `/tmp/vmn_input.mp4` as the video path.
 
-### 1. Transcribe
+Pick a run directory (default `/tmp/vmn_<slug>/`) and use it for all outputs.
 
-```
-python scripts/transcribe.py \
-  --video <video-path> \
-  --output /tmp/vmn_transcript.json \
-  --language <iso-code>      # optional; auto-detect if omitted
-```
+---
 
-Produces `{ "language": "...", "duration": ..., "segments": [{"start", "end", "text"}, ...] }`.
+## Step 1 — Spawn Task A and Task B IN PARALLEL
 
-### 2. Extract keyframes
+Spawn both tasks in a **single response turn**. Do NOT wait for one before spawning the other.
 
-```
-python scripts/extract_frames.py \
-  --video <video-path> \
-  --output-dir /tmp/vmn_frames \
-  --threshold 27.0           # AdaptiveDetector sensitivity, lower = more cuts
-  --min-scene-len 2.0        # seconds, suppresses flicker
-```
-
-Saves `frame_NNN.jpg` files plus `frame_times.json` mapping each filename to its timestamp (seconds).
-
-### 3. Compose notes
+### Task A — Transcribe audio
 
 ```
-python scripts/compose_notes.py \
-  --transcript /tmp/vmn_transcript.json \
-  --frames-dir /tmp/vmn_frames \
-  --output /tmp/vmn_notes.md \
-  --model gpt-4o-mini \
-  --segment-strategy topic   # topic | whisper
-  --max-images-per-section 2
+subagent_type: "general-purpose"
+description:   "Transcribe audio from video to JSON segments"
+prompt: |
+  Task: transcribe the audio from a video file.
+
+  Run this command exactly:
+    .venv/bin/python skills/video-meeting-notes/scripts/transcribe.py \
+      --video <abs-video-path> \
+      --output <run-dir>/transcript.json
+
+  When done, respond with one line: the absolute path to transcript.json.
+  If it fails, respond with the full error output.
 ```
 
-`topic` strategy uses an LLM to chunk the transcript into topical sections; `whisper` uses raw whisper segments (cheaper, less coherent).
+### Task B — Extract keyframes
 
-Each section gets the keyframe whose timestamp lies inside the section's time range. If multiple keyframes fall in one section, keep the first `--max-images-per-section`.
-
-## Output format
-
-```markdown
-# {{ derived title }}
-
-_Source: {{ video filename }} · Duration: {{ mm:ss }} · Language: {{ lang }}_
-
-## {{ section title }}
-
-![](frames/frame_007.jpg)
-
-- {{ bullet summary }}
-- {{ bullet summary }}
-
-## {{ next section }}
-...
 ```
+subagent_type: "general-purpose"
+description:   "Extract scene-change keyframes from video"
+prompt: |
+  Task: detect scene cuts in a video and save one keyframe image per scene.
+
+  Run this command exactly:
+    .venv/bin/python skills/video-meeting-notes/scripts/extract_frames.py \
+      --video <abs-video-path> \
+      --output-dir <run-dir>/frames
+
+  When done, respond with one line: the absolute path to frame_times.json.
+  If it fails, respond with the full error output.
+```
+
+---
+
+## Step 2 — Wait for Task A and Task B
+
+Both tasks must succeed before proceeding. If either fails:
+- Check `references/gotchas.md` for fix suggestions
+- Report the error to the user; do NOT proceed to Task C
+
+---
+
+## Step 3 — Spawn Task C (compose notes)
+
+```
+subagent_type: "general-purpose"
+description:   "Compose illustrated markdown notes from transcript and keyframes"
+prompt: |
+  Task: align keyframes to transcript sections and write illustrated markdown notes.
+
+  Run this command exactly:
+    .venv/bin/python skills/video-meeting-notes/scripts/compose_notes.py \
+      --transcript <run-dir>/transcript.json \
+      --frames-dir <run-dir>/frames \
+      --output <run-dir>/notes.md \
+      --model gpt-4o-mini \
+      --segment-strategy topic
+
+  When done, respond with one line: the absolute path to notes.md.
+  If it fails, respond with the full error output.
+```
+
+---
+
+## Step 4 — Return result
+
+Tell the user:
+1. The path to `notes.md`
+2. Print the first 40 lines of `notes.md` using `read_file`
 
 ## Gotchas
 
-- See `references/gotchas.md` for the long list. Most common: forgetting `OPENAI_API_KEY`, video too long (split first), zero scene cuts on a static talking-head (lower `--threshold` to 15).
-- See `references/output-format.md` for the full markdown spec the composer follows.
-- See `references/pipeline.md` for parameter tuning per content type.
+See `references/gotchas.md` for troubleshooting.
+See `references/pipeline.md` for parameter tuning per content type.
+See `references/output-format.md` for the markdown spec.

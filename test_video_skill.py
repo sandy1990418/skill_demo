@@ -13,7 +13,33 @@ from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends.local_shell import LocalShellBackend
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_openai import ChatOpenAI
+
+
+class SubagentTracer(BaseCallbackHandler):
+    """Tag tool calls as [main] or [subagent].
+
+    task() is synchronous — subagent runs between on_tool_start(task)
+    and on_tool_end(task). Track open task run_ids to classify calls.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._open_tasks: set = set()   # run_ids of in-flight task() calls
+
+    def on_tool_start(self, serialized, input_str, *, run_id, **kwargs):
+        name = serialized.get("name", "?")
+        if name == "task":
+            self._open_tasks.add(run_id)
+            tag = "[main]   "           # task() itself is a main-agent call
+        else:
+            tag = "[subagent]" if self._open_tasks else "[main]   "
+        preview = str(input_str)[:100].replace("\n", " ")
+        print(f"  {tag} {name}({preview}...)")
+
+    def on_tool_end(self, output, *, run_id, **kwargs):
+        self._open_tasks.discard(run_id)   # task() closed → back to main
 
 
 PROJECT_ROOT = Path(__file__).parent.resolve()
@@ -25,7 +51,7 @@ DEFAULT_INPUT = "/tmp/vmn_test/input.mp4"
 # Agent orchestrator. Cheap local model is fine — the heavy lifting is in scripts.
 # Swap to ChatOpenAI(model="gpt-4o-mini") if LM Studio not running.
 agent_model = ChatOpenAI(
-    model="gpt-5.4-mini",
+    model="gpt-5.4-nano",
     temperature=0,
 )
 
@@ -53,23 +79,27 @@ def main() -> None:
     out_dir = "/tmp/vmn_run"
 
     prompt = (
-        f"Please use the video-meeting-notes skill to turn the video at "
+        f"Please use the skill to turn the video at "
         f"`{video}` into illustrated markdown notes. "
         f"Save all outputs under `{out_dir}/`. "
         f"When done, print the final notes.md path and the first 30 lines of it."
     )
 
     print(f"=== running skill on {video} ===\n")
-    result = agent.invoke({"messages": [{"role": "user", "content": prompt}]})
-
-    print("\n--- tool call trace ---")
-    for msg in result["messages"]:
-        for call in getattr(msg, "tool_calls", None) or []:
-            args_preview = str(call.get("args", ""))[:120]
-            print(f"  {call['name']}({args_preview}...)")
+    print("--- tool call trace (main agent only) ---")
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": prompt}]},
+        config={"callbacks": [SubagentTracer()]},
+    )
 
     print("\n--- final answer ---")
     print(result["messages"][-1].content)
+
+    # Proof that subagent ran (written by SKILL.md instruction)
+    log = Path("/tmp/vmn_subagent.log")
+    if log.exists():
+        print("\n--- subagent log (proof) ---")
+        print(log.read_text())
 
 
 if __name__ == "__main__":
