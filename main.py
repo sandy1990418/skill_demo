@@ -179,12 +179,25 @@ def _log(log_file: Path, record: dict) -> None:
         f.write(json.dumps(record, ensure_ascii=False, default=_json_default) + "\n")
 
 
+_agent_stack: list[str] = ["main"]
+
+_CHAIN_NOISE = {"", "LangGraph", "tools", "agent"}
+
+
 def _print_event(event: dict) -> None:
     kind = event.get("event")
     name = event.get("name", "")
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
-    if kind == "on_chat_model_stream":
+    if kind == "on_chain_start" and name not in _CHAIN_NOISE:
+        _agent_stack.append(name)
+        print(f"\n[{ts}] >> {name}", flush=True)
+
+    elif kind == "on_chain_end" and name not in _CHAIN_NOISE:
+        if len(_agent_stack) > 1:
+            _agent_stack.pop()
+
+    elif kind == "on_chat_model_stream":
         chunk = event.get("data", {}).get("chunk")
         if chunk:
             for block in getattr(chunk, "content", []):
@@ -194,16 +207,15 @@ def _print_event(event: dict) -> None:
                 print(chunk.content, end="", flush=True)
 
     elif kind == "on_tool_start":
+        agent = _agent_stack[-1]
         inputs = event.get("data", {}).get("input", {})
-        print(f"\n[{ts}] TOOL {name} ← {json.dumps(inputs, ensure_ascii=False)}", flush=True)
+        print(f"\n[{ts}] [{agent}] TOOL {name} ← {json.dumps(inputs, ensure_ascii=False)}", flush=True)
 
     elif kind == "on_tool_end":
+        agent = _agent_stack[-1]
         output = event.get("data", {}).get("output")
         preview = str(output)[:200].replace("\n", " ")
-        print(f"[{ts}] TOOL {name} → {preview}", flush=True)
-
-    elif kind == "on_chain_start" and name not in ("", "LangGraph"):
-        print(f"\n[{ts}] >> {name}", flush=True)
+        print(f"[{ts}] [{agent}] TOOL {name} → {preview}", flush=True)
 
 
 _RETRYABLE = ("rate limit", "rate_limit", "429", "overloaded", "timeout", "connection")
@@ -262,7 +274,7 @@ def _build_agent(model):
 
 
 async def main() -> None:
-    model = _make_model() #openai:gpt-5.4-nano
+    model = "openai:gpt-5.4-mini" #_make_model() #
     agent = _build_agent(model)
 
     config = {"configurable": {"thread_id": "main"}, "recursion_limit": 1000}
