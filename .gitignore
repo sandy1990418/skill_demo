@@ -10,3 +10,7 @@ wheels/
 .venv
 uv.lock
 .env
+/data/*
+/conversation_history/*
+package.*
+/log/*
