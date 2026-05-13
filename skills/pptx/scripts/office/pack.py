@@ -19,6 +19,12 @@ from pathlib import Path
 
 import defusedxml.minidom
 
+# Ensure this file's directory is in sys.path so validators can be found
+# regardless of where this module is imported from
+_here = Path(__file__).parent
+if str(_here) not in sys.path:
+    sys.path.insert(0, str(_here))
+
 from validators import DOCXSchemaValidator, PPTXSchemaValidator, RedliningValidator
 
 def pack(
